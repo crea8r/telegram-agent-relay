@@ -2,7 +2,7 @@ import express from 'express';
 import pino from 'pino';
 import 'dotenv/config';
 import { z } from 'zod';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHmac } from 'node:crypto';
 import { Store } from './store.js';
 import { LoopGuard } from './loopGuard.js';
 import type { EventEnvelope } from './types.js';
@@ -14,6 +14,8 @@ app.use(express.json({ limit: '1mb' }));
 const store = new Store();
 const maxPerMinute = Number(process.env.LOOP_MAX_PER_MINUTE ?? '6');
 const guard = new LoopGuard(store, maxPerMinute);
+const deliveryMaxRetries = Number(process.env.DELIVERY_MAX_RETRIES ?? '3');
+const deliveryBaseDelayMs = Number(process.env.DELIVERY_BASE_DELAY_MS ?? '1000');
 
 const EventSchema = z.object({
   eventId: z.string().optional(),
@@ -35,7 +37,8 @@ const EventSchema = z.object({
 const AgentRegistrationSchema = z.object({
   agentId: z.string().min(1),
   displayName: z.string().optional(),
-  callbackUrl: z.string().url().optional(),
+  callbackUrl: z.string().url(),
+  callbackSecret: z.string().min(8).optional(),
   requestedSessionKeys: z.array(z.string()).default([])
 });
 
@@ -44,40 +47,114 @@ const AdminApprovalSchema = z.object({
   sessionKeys: z.array(z.string()).default([])
 });
 
+type RegistrationStatus = 'pending' | 'approved' | 'rejected';
+
+interface AgentRegistration {
+  agentId: string;
+  displayName?: string;
+  callbackUrl: string;
+  callbackSecret?: string;
+  requestedSessionKeys: string[];
+  registeredAt: number;
+  status: RegistrationStatus;
+}
+
 const whitelist = {
   approvedAgents: new Set<string>(),
   sessionsByAgent: new Map<string, Set<string>>(),
-  pendingRegistrations: new Map<
-    string,
-    {
-      agentId: string;
-      displayName?: string;
-      callbackUrl?: string;
-      requestedSessionKeys: string[];
-      registeredAt: number;
-      status: 'pending' | 'approved' | 'rejected';
-    }
-  >()
+  registrations: new Map<string, AgentRegistration>(),
+  seenEmittedEventIds: new Set<string>()
 };
 
-function canAgentRead(agentId: string, sessionKey: string) {
+function canAgentAccessSession(agentId: string, sessionKey: string) {
   if (!whitelist.approvedAgents.has(agentId)) return false;
   const allowed = whitelist.sessionsByAgent.get(agentId);
   return !!allowed?.has(sessionKey);
+}
+
+function getApprovedRecipients(sessionKey: string) {
+  const recipients: AgentRegistration[] = [];
+  for (const agentId of whitelist.approvedAgents) {
+    if (!canAgentAccessSession(agentId, sessionKey)) continue;
+    const reg = whitelist.registrations.get(agentId);
+    if (!reg || reg.status !== 'approved') continue;
+    recipients.push(reg);
+  }
+  return recipients;
+}
+
+function createSignature(secret: string, body: string) {
+  return createHmac('sha256', secret).update(body).digest('hex');
+}
+
+async function deliverToAgent(agent: AgentRegistration, evt: EventEnvelope, attempt = 1): Promise<void> {
+  const payload = {
+    type: 'router.event',
+    deliveryId: randomUUID(),
+    deliveredAt: Date.now(),
+    event: evt
+  };
+  const payloadText = JSON.stringify(payload);
+
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'x-router-agent-id': agent.agentId,
+    'x-router-event-id': evt.eventId,
+    'x-router-attempt': String(attempt)
+  };
+
+  if (agent.callbackSecret) {
+    headers['x-router-signature'] = createSignature(agent.callbackSecret, payloadText);
+    headers['x-router-signature-alg'] = 'hmac-sha256';
+  }
+
+  try {
+    const response = await fetch(agent.callbackUrl, {
+      method: 'POST',
+      headers,
+      body: payloadText
+    });
+
+    if (!response.ok) {
+      throw new Error(`callback non-2xx (${response.status})`);
+    }
+
+    log.info({ agentId: agent.agentId, eventId: evt.eventId, attempt }, 'event delivered to agent callback');
+  } catch (error) {
+    if (attempt >= deliveryMaxRetries) {
+      log.error({ agentId: agent.agentId, eventId: evt.eventId, err: String(error) }, 'delivery failed after max retries');
+      return;
+    }
+
+    const delay = deliveryBaseDelayMs * Math.pow(2, attempt - 1);
+    log.warn({ agentId: agent.agentId, eventId: evt.eventId, attempt, delay, err: String(error) }, 'delivery failed, retry scheduled');
+    setTimeout(() => {
+      void deliverToAgent(agent, evt, attempt + 1);
+    }, delay);
+  }
+}
+
+function fanOutEvent(evt: EventEnvelope) {
+  const recipients = getApprovedRecipients(evt.sessionKey);
+  for (const agent of recipients) {
+    // Avoid immediate self-loop by not callback-pushing agent's own emitted event back to itself.
+    if (evt.originActorType === 'agent' && evt.originActorId === agent.agentId) continue;
+    void deliverToAgent(agent, evt);
+  }
 }
 
 app.post('/agents/register', (req, res) => {
   const parsed = AgentRegistrationSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json(parsed.error.flatten());
 
-  const registration = {
+  const registration: AgentRegistration = {
     ...parsed.data,
     registeredAt: Date.now(),
-    status: 'pending' as const
+    status: 'pending'
   };
 
-  whitelist.pendingRegistrations.set(parsed.data.agentId, registration);
-  log.info({ agentId: parsed.data.agentId }, 'agent registration pending approval');
+  whitelist.registrations.set(parsed.data.agentId, registration);
+  log.info({ agentId: parsed.data.agentId, callbackUrl: parsed.data.callbackUrl }, 'agent registration pending approval');
 
   res.status(202).json({
     ok: true,
@@ -87,23 +164,29 @@ app.post('/agents/register', (req, res) => {
 });
 
 app.get('/admin/agents/pending', (_req, res) => {
-  const pending = [...whitelist.pendingRegistrations.values()].filter((r) => r.status === 'pending');
+  const pending = [...whitelist.registrations.values()].filter((r) => r.status === 'pending');
   res.json({ pending });
+});
+
+app.get('/admin/agents/approved', (_req, res) => {
+  const approved = [...whitelist.registrations.values()].filter((r) => r.status === 'approved');
+  res.json({ approved });
 });
 
 app.post('/admin/agents/approve', (req, res) => {
   const parsed = AdminApprovalSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json(parsed.error.flatten());
 
-  const pending = whitelist.pendingRegistrations.get(parsed.data.agentId);
-  if (!pending) {
+  const registration = whitelist.registrations.get(parsed.data.agentId);
+  if (!registration) {
     return res.status(404).json({ error: 'agent registration not found' });
   }
 
   whitelist.approvedAgents.add(parsed.data.agentId);
   whitelist.sessionsByAgent.set(parsed.data.agentId, new Set(parsed.data.sessionKeys));
-  whitelist.pendingRegistrations.set(parsed.data.agentId, {
-    ...pending,
+
+  whitelist.registrations.set(parsed.data.agentId, {
+    ...registration,
     status: 'approved',
     requestedSessionKeys: parsed.data.sessionKeys
   });
@@ -115,12 +198,12 @@ app.post('/admin/agents/reject', (req, res) => {
   const parsed = z.object({ agentId: z.string().min(1) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json(parsed.error.flatten());
 
-  const pending = whitelist.pendingRegistrations.get(parsed.data.agentId);
-  if (!pending) {
+  const registration = whitelist.registrations.get(parsed.data.agentId);
+  if (!registration) {
     return res.status(404).json({ error: 'agent registration not found' });
   }
 
-  whitelist.pendingRegistrations.set(parsed.data.agentId, { ...pending, status: 'rejected' });
+  whitelist.registrations.set(parsed.data.agentId, { ...registration, status: 'rejected' });
   whitelist.approvedAgents.delete(parsed.data.agentId);
   whitelist.sessionsByAgent.delete(parsed.data.agentId);
 
@@ -137,20 +220,34 @@ app.post('/mcp/events/publish', async (req, res) => {
     createdAt: Date.now()
   };
 
-  // self-message echo prevention
-  if (evt.originActorType === 'agent' && evt.emittedByAgentId && evt.originActorId === evt.emittedByAgentId) {
-    return res.json({ accepted: false, reason: 'self-echo blocked' });
+  // Ensure agent publishers are approved for session access.
+  if (evt.originActorType === 'agent' && !canAgentAccessSession(evt.originActorId, evt.sessionKey)) {
+    return res.status(403).json({ accepted: false, reason: 'agent not approved for this session' });
+  }
+
+  // Self-echo protection using emitted event ID dedupe.
+  if (evt.emittedEventId) {
+    if (whitelist.seenEmittedEventIds.has(evt.emittedEventId)) {
+      return res.json({ accepted: false, reason: 'self-echo duplicate emittedEventId blocked' });
+    }
+    whitelist.seenEmittedEventIds.add(evt.emittedEventId);
   }
 
   const { delayMs, decision } = await guard.evaluate(evt);
 
-  const enqueue = () => {
+  const enqueueAndFanout = () => {
     const accepted = store.append(evt);
-    log.info({ eventId: evt.eventId, sessionKey: evt.sessionKey, accepted, delayMs, decision }, 'event published');
+    if (!accepted) {
+      log.warn({ eventId: evt.eventId }, 'duplicate event ignored');
+      return;
+    }
+
+    log.info({ eventId: evt.eventId, sessionKey: evt.sessionKey, delayMs, decision }, 'event appended');
+    fanOutEvent(evt);
   };
 
-  if (delayMs > 0) setTimeout(enqueue, delayMs);
-  else enqueue();
+  if (delayMs > 0) setTimeout(enqueueAndFanout, delayMs);
+  else enqueueAndFanout();
 
   res.json({ accepted: true, delayed: delayMs > 0, delayMs, decision });
 });
@@ -158,14 +255,23 @@ app.post('/mcp/events/publish', async (req, res) => {
 app.get('/mcp/sessions/:sessionKey/events', (req, res) => {
   const agentId = String(req.query.agentId || '');
   const { sessionKey } = req.params;
-  if (!canAgentRead(agentId, sessionKey)) {
+  if (!canAgentAccessSession(agentId, sessionKey)) {
     return res.status(403).json({ error: 'not authorized by admin-approved whitelist' });
   }
   const events = store.list(sessionKey);
   res.json({ sessionKey, events });
 });
 
-app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/health', (_req, res) =>
+  res.json({
+    ok: true,
+    stats: {
+      approvedAgents: whitelist.approvedAgents.size,
+      registrations: whitelist.registrations.size,
+      sessions: whitelist.sessionsByAgent.size
+    }
+  })
+);
 
 const port = Number(process.env.PORT ?? '8787');
 app.listen(port, () => log.info({ port }, 'openclaw-context-router running'));

@@ -1,17 +1,18 @@
 # API
 
-## Agent onboarding flow
+## Agent onboarding flow (required)
 
 ### POST /agents/register
 
-Agent requests access. This does **not** grant access yet.
+Agent requests access and MUST provide callback endpoint for router push delivery.
 
 Request:
 ```json
 {
   "agentId": "agent-alpha",
   "displayName": "Alpha Planner",
-  "callbackUrl": "https://agent.example.com/hook",
+  "callbackUrl": "https://agent-alpha.example.com/router/events",
+  "callbackSecret": "agent-shared-secret",
   "requestedSessionKeys": ["telegram:-100:topic-98"]
 }
 ```
@@ -28,6 +29,10 @@ Response:
 ### GET /admin/agents/pending
 
 List pending agent registrations.
+
+### GET /admin/agents/approved
+
+List approved agents and callback metadata.
 
 ### POST /admin/agents/approve
 
@@ -56,7 +61,11 @@ Request:
 
 ### POST /mcp/events/publish
 
-Publish normalized event.
+Publish normalized event into router.
+
+- Agent publisher must be approved for target session.
+- Error loops are delayed (not dropped).
+- On append success, router pushes event to all approved agent callbacks in that session (excluding origin agent to avoid immediate self-loop).
 
 Request (example):
 ```json
@@ -91,10 +100,29 @@ Response:
 }
 ```
 
+### Callback payload (router -> agent)
+
+Router sends `POST callbackUrl`:
+```json
+{
+  "type": "router.event",
+  "deliveryId": "...",
+  "deliveredAt": 1739680000000,
+  "event": { "...event envelope..." }
+}
+```
+
+Headers:
+- `x-router-agent-id`
+- `x-router-event-id`
+- `x-router-attempt`
+- `x-router-signature` (if `callbackSecret` is set)
+- `x-router-signature-alg: hmac-sha256` (if signed)
+
 ### GET /mcp/sessions/:sessionKey/events?agentId=...
 
-Fetch events for a session. Requires admin-approved whitelist authorization.
+Pull fallback: fetch events for a session. Requires admin-approved authorization.
 
 ## GET /health
 
-Health check endpoint.
+Health check + basic stats.

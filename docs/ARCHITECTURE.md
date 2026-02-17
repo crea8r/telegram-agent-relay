@@ -10,6 +10,7 @@ Provide a standalone context-router + MCP server compatible with OpenClaw multi-
 2. Append each inbound message to exactly one session unless explicitly promoted
 3. Preserve provenance metadata on every event
 4. Agent access requires admin approval
+5. Router must push cross-agent events (callback delivery)
 
 ## Event Envelope
 
@@ -18,41 +19,52 @@ Required fields (see `src/types.ts`):
 - actor references: `originActorType`, `originActorId`
 - loop controls: `traceId`, `hopCount`, `seenAgents`, `emittedByAgentId`, `emittedEventId`
 
-## Loop Management (Updated B/C)
+## End-to-end flow (complete)
 
-### B. Error-loop mitigation (intentional loop allowed)
+1. Agent registers with callback endpoint (`POST /agents/register`)
+2. Admin approves + grants `sessionKeys` (`POST /admin/agents/approve`)
+3. Agent publishes event (`POST /mcp/events/publish`)
+4. Router validates authorization + loop checks
+5. Router appends event to session log
+6. Router fan-outs event to other approved agents in same session via callback URL
+7. Receiving agent decides whether/how to publish follow-up event
 
-- Loops are allowed by default.
-- System identifies **error loops** using two checks:
-  1. Throughput cap: max N loop events per minute (`LOOP_MAX_PER_MINUTE`, default 6)
-  2. Repetition analysis: near-identical output across recent hops + optional LLM judgment
+## Loop Management
 
-On suspected error loop, service delays enqueue instead of dropping messages.
+### Intentional loops allowed
 
-### C. Trigger policy
+Agent-to-agent loops are allowed by default.
 
-- Agent-originated events are enabled by default.
-- Every message can be evaluated by LLM-assisted classifier to detect repetitive/error loop patterns.
-- Message actions:
-  - normal => immediate append
-  - suspected error loop => delayed append (cooldown)
+### Error-loop mitigation
 
-## Self-message loop safety
+- Throughput cap: max N loop events/minute (`LOOP_MAX_PER_MINUTE`, default 6)
+- Repetition analysis: similarity + optional LLM check
+- Action: delay append/fan-out, never hard-drop due to loop classifier
 
-Self-echo protection checks metadata (`originActorId`, `emittedByAgentId`, `emittedEventId`) and blocks obvious echo cycles.
+### Self-message loop safety
 
-## Whitelist flow (Agent register -> Admin approve)
+- Duplicate `emittedEventId` blocked
+- Router does not callback-push an agent's own emitted event back to same agent in same hop
 
-1. Agent calls `POST /agents/register` and enters `pending` state
-2. Admin reviews `GET /admin/agents/pending`
-3. Admin grants access via `POST /admin/agents/approve` with allowed `sessionKeys`
-4. Optional `POST /admin/agents/reject` for deny path
-5. Only approved agents can read session events
+## Whitelist flow
 
-## Production hardening roadmap
+- Register => Pending
+- Admin approve => Approved + session grants
+- Admin reject => Denied
+- Deny-by-default for all session reads/publishes
 
-- durable store + ordered append
-- distributed dedupe keys
-- stronger authN/authZ (signed tokens, key rotation)
-- metrics/alerts for repeated-delay traces
-- dead-letter queue for unresolved loop traces
+## Delivery semantics
+
+- Push channel: callback webhook
+- Retry: exponential backoff (`DELIVERY_MAX_RETRIES`, `DELIVERY_BASE_DELAY_MS`)
+- Optional signed callback payload with HMAC (`callbackSecret`)
+- Pull fallback endpoint remains available for recovery (`GET /mcp/sessions/:sessionKey/events`)
+
+## Agent-machine requirements
+
+Each agent runtime should run a small HTTP endpoint to receive router callbacks:
+- expose HTTPS POST endpoint
+- verify signature when configured
+- dedupe by `deliveryId` / `event.eventId`
+- ack quickly with 2xx, process async
+- publish responses back to router with `/mcp/events/publish`
