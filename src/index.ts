@@ -6,6 +6,7 @@ import { randomUUID, createHmac } from 'node:crypto';
 import { Store } from './store.js';
 import { LoopGuard } from './loopGuard.js';
 import type { EventEnvelope } from './types.js';
+import { registerAdminRoutes, type AgentRegistration, type WhitelistState } from './adminRoutes.js';
 
 const log = pino({ transport: { target: 'pino-pretty' } });
 const app = express();
@@ -13,7 +14,12 @@ app.use(express.json({ limit: '1mb' }));
 
 const store = new Store();
 const maxPerMinute = Number(process.env.LOOP_MAX_PER_MINUTE ?? '6');
-const guard = new LoopGuard(store, maxPerMinute);
+const loopDelayDefaultMs = Number(process.env.LOOP_DELAY_DEFAULT_MS ?? '2000');
+const loopDelayBurstMs = Number(process.env.LOOP_DELAY_BURST_MS ?? String(loopDelayDefaultMs));
+const guard = new LoopGuard(store, maxPerMinute, {
+  delayDefaultMs: loopDelayDefaultMs,
+  delayBurstMs: loopDelayBurstMs
+});
 const deliveryMaxRetries = Number(process.env.DELIVERY_MAX_RETRIES ?? '3');
 const deliveryBaseDelayMs = Number(process.env.DELIVERY_BASE_DELAY_MS ?? '1000');
 
@@ -42,24 +48,7 @@ const AgentRegistrationSchema = z.object({
   requestedSessionKeys: z.array(z.string()).default([])
 });
 
-const AdminApprovalSchema = z.object({
-  agentId: z.string().min(1),
-  sessionKeys: z.array(z.string()).default([])
-});
-
-type RegistrationStatus = 'pending' | 'approved' | 'rejected';
-
-interface AgentRegistration {
-  agentId: string;
-  displayName?: string;
-  callbackUrl: string;
-  callbackSecret?: string;
-  requestedSessionKeys: string[];
-  registeredAt: number;
-  status: RegistrationStatus;
-}
-
-const whitelist = {
+const whitelist: WhitelistState = {
   approvedAgents: new Set<string>(),
   sessionsByAgent: new Map<string, Set<string>>(),
   registrations: new Map<string, AgentRegistration>(),
@@ -137,7 +126,6 @@ async function deliverToAgent(agent: AgentRegistration, evt: EventEnvelope, atte
 function fanOutEvent(evt: EventEnvelope) {
   const recipients = getApprovedRecipients(evt.sessionKey);
   for (const agent of recipients) {
-    // Avoid immediate self-loop by not callback-pushing agent's own emitted event back to itself.
     if (evt.originActorType === 'agent' && evt.originActorId === agent.agentId) continue;
     void deliverToAgent(agent, evt);
   }
@@ -163,52 +151,7 @@ app.post('/agents/register', (req, res) => {
   });
 });
 
-app.get('/admin/agents/pending', (_req, res) => {
-  const pending = [...whitelist.registrations.values()].filter((r) => r.status === 'pending');
-  res.json({ pending });
-});
-
-app.get('/admin/agents/approved', (_req, res) => {
-  const approved = [...whitelist.registrations.values()].filter((r) => r.status === 'approved');
-  res.json({ approved });
-});
-
-app.post('/admin/agents/approve', (req, res) => {
-  const parsed = AdminApprovalSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json(parsed.error.flatten());
-
-  const registration = whitelist.registrations.get(parsed.data.agentId);
-  if (!registration) {
-    return res.status(404).json({ error: 'agent registration not found' });
-  }
-
-  whitelist.approvedAgents.add(parsed.data.agentId);
-  whitelist.sessionsByAgent.set(parsed.data.agentId, new Set(parsed.data.sessionKeys));
-
-  whitelist.registrations.set(parsed.data.agentId, {
-    ...registration,
-    status: 'approved',
-    requestedSessionKeys: parsed.data.sessionKeys
-  });
-
-  res.json({ ok: true, status: 'approved', agentId: parsed.data.agentId });
-});
-
-app.post('/admin/agents/reject', (req, res) => {
-  const parsed = z.object({ agentId: z.string().min(1) }).safeParse(req.body);
-  if (!parsed.success) return res.status(400).json(parsed.error.flatten());
-
-  const registration = whitelist.registrations.get(parsed.data.agentId);
-  if (!registration) {
-    return res.status(404).json({ error: 'agent registration not found' });
-  }
-
-  whitelist.registrations.set(parsed.data.agentId, { ...registration, status: 'rejected' });
-  whitelist.approvedAgents.delete(parsed.data.agentId);
-  whitelist.sessionsByAgent.delete(parsed.data.agentId);
-
-  res.json({ ok: true, status: 'rejected', agentId: parsed.data.agentId });
-});
+registerAdminRoutes(app, whitelist);
 
 app.post('/mcp/events/publish', async (req, res) => {
   const parsed = EventSchema.safeParse(req.body);
@@ -220,12 +163,10 @@ app.post('/mcp/events/publish', async (req, res) => {
     createdAt: Date.now()
   };
 
-  // Ensure agent publishers are approved for session access.
   if (evt.originActorType === 'agent' && !canAgentAccessSession(evt.originActorId, evt.sessionKey)) {
     return res.status(403).json({ accepted: false, reason: 'agent not approved for this session' });
   }
 
-  // Self-echo protection using emitted event ID dedupe.
   if (evt.emittedEventId) {
     if (whitelist.seenEmittedEventIds.has(evt.emittedEventId)) {
       return res.json({ accepted: false, reason: 'self-echo duplicate emittedEventId blocked' });
@@ -235,15 +176,32 @@ app.post('/mcp/events/publish', async (req, res) => {
 
   const { delayMs, decision } = await guard.evaluate(evt);
 
+  // hard-stop path: do not append/fan-out
+  if (decision.isErrorLoop && decision.confidence >= 0.95) {
+    log.warn({ eventId: evt.eventId, sessionKey: evt.sessionKey, decision }, 'event stopped by loop guard');
+    return res.json({ accepted: false, stopped: true, delayMs: 0, decision });
+  }
+
+  // soft-warning path: append guard note for agent decision
+  let outboundEvent = evt;
+  if (decision.isErrorLoop && decision.confidence > 0.7 && decision.confidence < 0.95) {
+    outboundEvent = {
+      ...evt,
+      text:
+        `${evt.text}\n\n[LOOP_GUARD_NOTE] Possible error loop detected (confidence=${decision.confidence.toFixed(2)}). ` +
+        'Please evaluate and stop if this is an erroneous loop.'
+    };
+  }
+
   const enqueueAndFanout = () => {
-    const accepted = store.append(evt);
+    const accepted = store.append(outboundEvent);
     if (!accepted) {
-      log.warn({ eventId: evt.eventId }, 'duplicate event ignored');
+      log.warn({ eventId: outboundEvent.eventId }, 'duplicate event ignored');
       return;
     }
 
-    log.info({ eventId: evt.eventId, sessionKey: evt.sessionKey, delayMs, decision }, 'event appended');
-    fanOutEvent(evt);
+    log.info({ eventId: outboundEvent.eventId, sessionKey: outboundEvent.sessionKey, delayMs, decision }, 'event appended');
+    fanOutEvent(outboundEvent);
   };
 
   if (delayMs > 0) setTimeout(enqueueAndFanout, delayMs);

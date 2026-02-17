@@ -15,8 +15,17 @@ function jaccard(a: string, b: string) {
   return union === 0 ? 0 : inter / union;
 }
 
+interface LoopGuardOptions {
+  delayDefaultMs: number;
+  delayBurstMs: number;
+}
+
 export class LoopGuard {
-  constructor(private store: Store, private maxPerMinute: number) {}
+  constructor(
+    private store: Store,
+    private maxPerMinute: number,
+    private options: LoopGuardOptions
+  ) {}
 
   async evaluate(candidate: EventEnvelope): Promise<{ delayMs: number; decision: RouterDecision }> {
     const recentTrace = this.store.recentByTrace(candidate.traceId, 60_000);
@@ -27,10 +36,9 @@ export class LoopGuard {
       confidence: 0.6
     };
 
-    // Rate limiter for burst loops: do not drop, delay posting.
     if (recentTrace.length >= this.maxPerMinute) {
       return {
-        delayMs: 60_000,
+        delayMs: this.options.delayBurstMs,
         decision: {
           isErrorLoop: true,
           reason: `max ${this.maxPerMinute} loop events per minute exceeded; delaying`,
@@ -39,14 +47,13 @@ export class LoopGuard {
       };
     }
 
-    // Heuristic repetition check across few hops.
     const last = recentTrace.slice(-4);
     if (last.length >= 3) {
       const sims = last.map((e) => jaccard(e.text, candidate.text));
       const repetitive = sims.filter((s) => s >= SIMILARITY_MIN).length >= 2;
       if (repetitive) {
         return {
-          delayMs: 10_000,
+          delayMs: this.options.delayDefaultMs,
           decision: {
             isErrorLoop: true,
             reason: 'near-identical repeated outputs detected; delayed for safety',

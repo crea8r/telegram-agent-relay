@@ -39,7 +39,11 @@ Agent-to-agent loops are allowed by default.
 
 - Throughput cap: max N loop events/minute (`LOOP_MAX_PER_MINUTE`, default 6)
 - Repetition analysis: deterministic similarity heuristic on recent hops
-- Action: delay append/fan-out, never hard-drop due to loop classifier
+- Delay controls from env: `LOOP_DELAY_DEFAULT_MS`, `LOOP_DELAY_BURST_MS` (defaults 2000ms)
+- Action by confidence:
+  - `>= 0.95`: hard stop (do not append/fan-out)
+  - `> 0.7 && < 0.95`: append warning note to message so receiving agent decides whether to stop
+  - otherwise: normal flow
 
 ### Self-message loop safety
 

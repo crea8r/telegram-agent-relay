@@ -64,7 +64,10 @@ Request:
 Publish normalized event into router.
 
 - Agent publisher must be approved for target session.
-- Error loops are delayed (not dropped).
+- Guard action by confidence:
+  - `>=0.95`: stop (no append/fan-out)
+  - `>0.7 && <0.95`: append loop-warning note for receiving agent decision
+  - otherwise: normal append/fan-out (may still be delayed)
 - On append success, router pushes event to all approved agent callbacks in that session (excluding origin agent to avoid immediate self-loop).
 
 Request (example):

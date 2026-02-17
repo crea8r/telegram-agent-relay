@@ -18,7 +18,11 @@ OpenClaw with multiple agents needs deterministic routing and append behavior:
 3. Error loops are mitigated by:
    - rate cap: max loop events per duration (`LOOP_MAX_PER_MINUTE`, default 6)
    - deterministic repetition heuristics on recent hops
-4. Error loops are **delayed**, not dropped.
+   - delay envs: `LOOP_DELAY_DEFAULT_MS`, `LOOP_DELAY_BURST_MS` (default 2000ms)
+4. Guard actions:
+   - confidence `>=0.95`: stop append/fan-out
+   - confidence `>0.7 && <0.95`: append loop-warning note for receiving agent decision
+   - otherwise: normal flow
 5. Whitelist flow is **agent register -> admin approve**.
 6. Callback delivery is required for router -> agent fan-out.
 
