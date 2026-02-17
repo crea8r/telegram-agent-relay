@@ -8,6 +8,7 @@ OpenClaw with multiple agents needs deterministic routing and append behavior:
 - one topic/thread maps to one `sessionKey`
 - no accidental cross-session bleed
 - safe handling of intentional loops while slowing error loops
+- admin-controlled onboarding for agent access
 
 ## Key Design Decisions
 
@@ -17,6 +18,7 @@ OpenClaw with multiple agents needs deterministic routing and append behavior:
    - rate cap: max loop events per duration (`LOOP_MAX_PER_MINUTE`, default 6)
    - LLM decision per message to classify repetition as error loop
 4. Error loops are **delayed**, not dropped.
+5. Whitelist flow is **agent register -> admin approve**.
 
 ## Quickstart
 
@@ -30,7 +32,10 @@ Server runs on `http://localhost:8787` by default.
 
 ## Endpoints
 
-- `POST /admin/whitelist/agent`
+- `POST /agents/register`
+- `GET /admin/agents/pending`
+- `POST /admin/agents/approve`
+- `POST /admin/agents/reject`
 - `POST /mcp/events/publish`
 - `GET /mcp/sessions/:sessionKey/events?agentId=...`
 - `GET /health`

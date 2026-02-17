@@ -9,7 +9,7 @@ Provide a standalone context-router + MCP server compatible with OpenClaw multi-
 1. One topic/thread => one `sessionKey`
 2. Append each inbound message to exactly one session unless explicitly promoted
 3. Preserve provenance metadata on every event
-4. Whitelist controls which agents can read which sessions
+4. Agent access requires admin approval
 
 ## Event Envelope
 
@@ -41,11 +41,13 @@ On suspected error loop, service delays enqueue instead of dropping messages.
 
 Self-echo protection checks metadata (`originActorId`, `emittedByAgentId`, `emittedEventId`) and blocks obvious echo cycles.
 
-## Whitelist model
+## Whitelist flow (Agent register -> Admin approve)
 
-- Admin registers `agentId` + allowed `sessionKeys`
-- Session reads require whitelist authorization
-- Deny by default
+1. Agent calls `POST /agents/register` and enters `pending` state
+2. Admin reviews `GET /admin/agents/pending`
+3. Admin grants access via `POST /admin/agents/approve` with allowed `sessionKeys`
+4. Optional `POST /admin/agents/reject` for deny path
+5. Only approved agents can read session events
 
 ## Production hardening roadmap
 

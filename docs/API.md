@@ -1,8 +1,37 @@
 # API
 
-## POST /admin/whitelist/agent
+## Agent onboarding flow
 
-Register/update allowed sessions for an agent.
+### POST /agents/register
+
+Agent requests access. This does **not** grant access yet.
+
+Request:
+```json
+{
+  "agentId": "agent-alpha",
+  "displayName": "Alpha Planner",
+  "callbackUrl": "https://agent.example.com/hook",
+  "requestedSessionKeys": ["telegram:-100:topic-98"]
+}
+```
+
+Response:
+```json
+{
+  "ok": true,
+  "status": "pending",
+  "message": "agent registered; waiting for admin approval"
+}
+```
+
+### GET /admin/agents/pending
+
+List pending agent registrations.
+
+### POST /admin/agents/approve
+
+Admin approves an agent and grants session access.
 
 Request:
 ```json
@@ -12,7 +41,20 @@ Request:
 }
 ```
 
-## POST /mcp/events/publish
+### POST /admin/agents/reject
+
+Admin rejects an agent registration.
+
+Request:
+```json
+{
+  "agentId": "agent-alpha"
+}
+```
+
+## Message/event flow
+
+### POST /mcp/events/publish
 
 Publish normalized event.
 
@@ -49,9 +91,9 @@ Response:
 }
 ```
 
-## GET /mcp/sessions/:sessionKey/events?agentId=...
+### GET /mcp/sessions/:sessionKey/events?agentId=...
 
-Fetch events for a session. Requires agent whitelist authorization.
+Fetch events for a session. Requires admin-approved whitelist authorization.
 
 ## GET /health
 

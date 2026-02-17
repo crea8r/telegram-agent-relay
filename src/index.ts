@@ -32,23 +32,99 @@ const EventSchema = z.object({
   emittedEventId: z.string().optional()
 });
 
+const AgentRegistrationSchema = z.object({
+  agentId: z.string().min(1),
+  displayName: z.string().optional(),
+  callbackUrl: z.string().url().optional(),
+  requestedSessionKeys: z.array(z.string()).default([])
+});
+
+const AdminApprovalSchema = z.object({
+  agentId: z.string().min(1),
+  sessionKeys: z.array(z.string()).default([])
+});
+
 const whitelist = {
-  agents: new Set<string>(),
-  sessionsByAgent: new Map<string, Set<string>>()
+  approvedAgents: new Set<string>(),
+  sessionsByAgent: new Map<string, Set<string>>(),
+  pendingRegistrations: new Map<
+    string,
+    {
+      agentId: string;
+      displayName?: string;
+      callbackUrl?: string;
+      requestedSessionKeys: string[];
+      registeredAt: number;
+      status: 'pending' | 'approved' | 'rejected';
+    }
+  >()
 };
 
 function canAgentRead(agentId: string, sessionKey: string) {
-  if (!whitelist.agents.has(agentId)) return false;
+  if (!whitelist.approvedAgents.has(agentId)) return false;
   const allowed = whitelist.sessionsByAgent.get(agentId);
   return !!allowed?.has(sessionKey);
 }
 
-app.post('/admin/whitelist/agent', (req, res) => {
-  const parsed = z.object({ agentId: z.string(), sessionKeys: z.array(z.string()) }).safeParse(req.body);
+app.post('/agents/register', (req, res) => {
+  const parsed = AgentRegistrationSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json(parsed.error.flatten());
-  whitelist.agents.add(parsed.data.agentId);
+
+  const registration = {
+    ...parsed.data,
+    registeredAt: Date.now(),
+    status: 'pending' as const
+  };
+
+  whitelist.pendingRegistrations.set(parsed.data.agentId, registration);
+  log.info({ agentId: parsed.data.agentId }, 'agent registration pending approval');
+
+  res.status(202).json({
+    ok: true,
+    status: 'pending',
+    message: 'agent registered; waiting for admin approval'
+  });
+});
+
+app.get('/admin/agents/pending', (_req, res) => {
+  const pending = [...whitelist.pendingRegistrations.values()].filter((r) => r.status === 'pending');
+  res.json({ pending });
+});
+
+app.post('/admin/agents/approve', (req, res) => {
+  const parsed = AdminApprovalSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json(parsed.error.flatten());
+
+  const pending = whitelist.pendingRegistrations.get(parsed.data.agentId);
+  if (!pending) {
+    return res.status(404).json({ error: 'agent registration not found' });
+  }
+
+  whitelist.approvedAgents.add(parsed.data.agentId);
   whitelist.sessionsByAgent.set(parsed.data.agentId, new Set(parsed.data.sessionKeys));
-  res.json({ ok: true });
+  whitelist.pendingRegistrations.set(parsed.data.agentId, {
+    ...pending,
+    status: 'approved',
+    requestedSessionKeys: parsed.data.sessionKeys
+  });
+
+  res.json({ ok: true, status: 'approved', agentId: parsed.data.agentId });
+});
+
+app.post('/admin/agents/reject', (req, res) => {
+  const parsed = z.object({ agentId: z.string().min(1) }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json(parsed.error.flatten());
+
+  const pending = whitelist.pendingRegistrations.get(parsed.data.agentId);
+  if (!pending) {
+    return res.status(404).json({ error: 'agent registration not found' });
+  }
+
+  whitelist.pendingRegistrations.set(parsed.data.agentId, { ...pending, status: 'rejected' });
+  whitelist.approvedAgents.delete(parsed.data.agentId);
+  whitelist.sessionsByAgent.delete(parsed.data.agentId);
+
+  res.json({ ok: true, status: 'rejected', agentId: parsed.data.agentId });
 });
 
 app.post('/mcp/events/publish', async (req, res) => {
@@ -83,7 +159,7 @@ app.get('/mcp/sessions/:sessionKey/events', (req, res) => {
   const agentId = String(req.query.agentId || '');
   const { sessionKey } = req.params;
   if (!canAgentRead(agentId, sessionKey)) {
-    return res.status(403).json({ error: 'not authorized by whitelist' });
+    return res.status(403).json({ error: 'not authorized by admin-approved whitelist' });
   }
   const events = store.list(sessionKey);
   res.json({ sessionKey, events });
