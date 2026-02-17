@@ -43,7 +43,7 @@ Server runs on `http://localhost:8787` by default.
 - `GET /mcp/sessions/:sessionKey/events?agentId=...`
 - `GET /health`
 
-See `docs/API.md` and `docs/ARCHITECTURE.md`.
+See `docs/API.md`, `docs/ARCHITECTURE.md`, and `docs/AGENT_MACHINE_SETUP.md`.
 
 ## Agent machine runtime required
 
