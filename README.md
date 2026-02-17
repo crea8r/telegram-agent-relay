@@ -17,7 +17,7 @@ OpenClaw with multiple agents needs deterministic routing and append behavior:
 2. Intentional loops are allowed.
 3. Error loops are mitigated by:
    - rate cap: max loop events per duration (`LOOP_MAX_PER_MINUTE`, default 6)
-   - LLM decision per message to classify repetition as error loop
+   - deterministic repetition heuristics on recent hops
 4. Error loops are **delayed**, not dropped.
 5. Whitelist flow is **agent register -> admin approve**.
 6. Callback delivery is required for router -> agent fan-out.
@@ -53,4 +53,3 @@ Yes. Each agent needs a callback endpoint service to receive router events, then
 
 - Current implementation uses in-memory state for rapid iteration.
 - Replace with durable DB/queue for production.
-- LLM loop decision uses OpenAI-compatible chat API when `OPENAI_API_KEY` is set.

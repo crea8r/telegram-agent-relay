@@ -15,56 +15,6 @@ function jaccard(a: string, b: string) {
   return union === 0 ? 0 : inter / union;
 }
 
-async function llmLoopDecision(candidate: EventEnvelope, history: EventEnvelope[]): Promise<RouterDecision | null> {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) return null;
-
-  const payload = {
-    model: 'gpt-4o-mini',
-    temperature: 0,
-    messages: [
-      {
-        role: 'system',
-        content:
-          'Decide if this is an ERROR LOOP only (not intentional loop). Return strict JSON: {"isErrorLoop":boolean,"reason":string,"confidence":number}.'
-      },
-      {
-        role: 'user',
-        content: JSON.stringify({
-          rule: 'Treat repeated near-identical outputs over multiple hops as error loop.',
-          candidate,
-          history: history.slice(-8)
-        })
-      }
-    ],
-    response_format: { type: 'json_object' }
-  };
-
-  const res = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(payload)
-  });
-
-  if (!res.ok) return null;
-  const json = await res.json() as any;
-  const text = json?.choices?.[0]?.message?.content;
-  if (!text) return null;
-  try {
-    const parsed = JSON.parse(text);
-    return {
-      isErrorLoop: !!parsed.isErrorLoop,
-      reason: String(parsed.reason ?? 'llm decision'),
-      confidence: Number(parsed.confidence ?? 0.5)
-    };
-  } catch {
-    return null;
-  }
-}
-
 export class LoopGuard {
   constructor(private store: Store, private maxPerMinute: number) {}
 
@@ -95,13 +45,9 @@ export class LoopGuard {
       const sims = last.map((e) => jaccard(e.text, candidate.text));
       const repetitive = sims.filter((s) => s >= SIMILARITY_MIN).length >= 2;
       if (repetitive) {
-        const llm = await llmLoopDecision(candidate, recentTrace);
-        if (llm?.isErrorLoop) {
-          return { delayMs: 20_000, decision: llm };
-        }
         return {
           delayMs: 10_000,
-          decision: llm ?? {
+          decision: {
             isErrorLoop: true,
             reason: 'near-identical repeated outputs detected; delayed for safety',
             confidence: 0.8

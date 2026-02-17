@@ -38,7 +38,7 @@ Agent-to-agent loops are allowed by default.
 ### Error-loop mitigation
 
 - Throughput cap: max N loop events/minute (`LOOP_MAX_PER_MINUTE`, default 6)
-- Repetition analysis: similarity + optional LLM check
+- Repetition analysis: deterministic similarity heuristic on recent hops
 - Action: delay append/fan-out, never hard-drop due to loop classifier
 
 ### Self-message loop safety
