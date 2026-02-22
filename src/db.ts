@@ -1,4 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 export interface DeliveryRecord {
   deliveryId: string;
@@ -23,6 +25,7 @@ export class RouterDb {
   private db: DatabaseSync;
 
   constructor(path = process.env.SQLITE_PATH ?? './data/router.db') {
+    mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.migrate();
   }
