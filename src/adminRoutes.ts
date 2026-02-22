@@ -1,4 +1,4 @@
-import type { Express } from 'express';
+import type { Express, RequestHandler } from 'express';
 import { z } from 'zod';
 
 export type RegistrationStatus = 'pending' | 'approved' | 'rejected';
@@ -25,18 +25,18 @@ const AdminApprovalSchema = z.object({
   sessionKeys: z.array(z.string()).default([])
 });
 
-export function registerAdminRoutes(app: Express, whitelist: WhitelistState) {
-  app.get('/admin/agents/pending', (_req, res) => {
+export function registerAdminRoutes(app: Express, whitelist: WhitelistState, requireAdmin: RequestHandler) {
+  app.get('/admin/agents/pending', requireAdmin, (_req, res) => {
     const pending = [...whitelist.registrations.values()].filter((r) => r.status === 'pending');
     res.json({ pending });
   });
 
-  app.get('/admin/agents/approved', (_req, res) => {
+  app.get('/admin/agents/approved', requireAdmin, (_req, res) => {
     const approved = [...whitelist.registrations.values()].filter((r) => r.status === 'approved');
     res.json({ approved });
   });
 
-  app.post('/admin/agents/approve', (req, res) => {
+  app.post('/admin/agents/approve', requireAdmin, (req, res) => {
     const parsed = AdminApprovalSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json(parsed.error.flatten());
 
@@ -57,7 +57,7 @@ export function registerAdminRoutes(app: Express, whitelist: WhitelistState) {
     res.json({ ok: true, status: 'approved', agentId: parsed.data.agentId });
   });
 
-  app.post('/admin/agents/reject', (req, res) => {
+  app.post('/admin/agents/reject', requireAdmin, (req, res) => {
     const parsed = z.object({ agentId: z.string().min(1) }).safeParse(req.body);
     if (!parsed.success) return res.status(400).json(parsed.error.flatten());
 

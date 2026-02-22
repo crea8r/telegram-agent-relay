@@ -1,0 +1,15 @@
+<!doctype html>
+<html><head><meta charset="utf-8"/><title>Relay Admin Login</title><style>body{font-family:Arial;max-width:420px;margin:80px auto}input,button{width:100%;padding:10px;margin:8px 0}</style></head>
+<body>
+  <h2>Telegram Agent Relay Admin</h2>
+  <form id="f">
+    <input id="pw" type="password" placeholder="Admin password" required />
+    <button>Login</button>
+  </form>
+  <p id="m"></p>
+<script>
+const f=document.getElementById('f');
+f.onsubmit=async(e)=>{e.preventDefault();const r=await fetch('/admin/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({password:document.getElementById('pw').value})});
+if(r.ok){location.href='/admin/ui/dashboard.html';}else{document.getElementById('m').innerText='Login failed';}}
+</script>
+</body></html>

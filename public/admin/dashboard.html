@@ -1,0 +1,23 @@
+<!doctype html>
+<html><head><meta charset="utf-8"/><title>Relay Admin</title><style>body{font-family:Arial;margin:20px}.grid{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}.card{border:1px solid #ddd;padding:10px}table{width:100%;border-collapse:collapse}td,th{border:1px solid #eee;padding:6px;font-size:12px}</style></head>
+<body>
+<h2>Telegram Agent Relay Dashboard</h2>
+<button id="logout">Logout</button>
+<div class="grid" id="metrics"></div>
+<h3>Sessions</h3><table id="sessions"></table>
+<h3>Recent Loop Decisions</h3><table id="loops"></table>
+<h3>Recent Deliveries</h3><table id="deliveries"></table>
+<script>
+async function j(u){const r=await fetch(u);if(r.status===401){location.href='/admin/ui/index.html';return [];}return r.json();}
+function table(el,rows){if(!rows.length){el.innerHTML='<tr><td>No data</td></tr>';return;}const cols=Object.keys(rows[0]);el.innerHTML='<tr>'+cols.map(c=>`<th>${c}</th>`).join('')+'</tr>'+rows.map(r=>'<tr>'+cols.map(c=>`<td>${String(r[c]??'')}</td>`).join('')+'</tr>').join('');}
+async function load(){
+  const m=await j('/admin/api/metrics');
+  document.getElementById('metrics').innerHTML=Object.entries(m).map(([k,v])=>`<div class='card'><b>${k}</b><div>${v}</div></div>`).join('');
+  table(document.getElementById('sessions'), await j('/admin/api/sessions'));
+  table(document.getElementById('loops'), await j('/admin/api/loops'));
+  table(document.getElementById('deliveries'), await j('/admin/api/deliveries'));
+}
+setInterval(load,4000);load();
+document.getElementById('logout').onclick=async()=>{await fetch('/admin/logout',{method:'POST'});location.href='/admin/ui/index.html';};
+</script>
+</body></html>

@@ -16,7 +16,7 @@ function makeState() {
 function makeApp(state) {
   const app = express();
   app.use(express.json());
-  registerAdminRoutes(app, state);
+  registerAdminRoutes(app, state, (_req, _res, next) => next());
   return app;
 }
 
